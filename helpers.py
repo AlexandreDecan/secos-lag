@@ -18,13 +18,15 @@ def savefig(fig, name):
     )
 
 
-def semver(constraint, versions):
+def semver(constraint, versions, loose=True):
     """
     Return the versions in ``versions'' that satisfy given constraint.
     Semantic is provided by the semver tool of nodejs.
     """
     args = ['semver', '-r', constraint] + list(versions)
-    
+    if loose:
+        args.append('--loose')
+        
     completed = subprocess.run(args, stdout=subprocess.PIPE)
     if completed.returncode == 0:
         return completed.stdout.decode().strip().split('\n')
