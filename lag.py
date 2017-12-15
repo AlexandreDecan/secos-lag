@@ -7,6 +7,9 @@ import multiprocessing
 from helpers import semver
 
 
+WORKERS = 12  # 12 cores
+
+
 def chunks(iterable, n, fillvalue=None):
     "Collect data into fixed-length chunks or blocks"
     # grouper('ABCDEFG', 3, 'x') --> ABC DEF Gxx"
@@ -84,14 +87,14 @@ def compute_lags(releases, time, next_time, constraint):
         # Find highest installable and annotate missed releases
         try:
             highest_installable = releases[lambda d: d['Installable'] & d[available_label]].iloc[-1]
-            releases['Missed'] = releases[available_label] & (releases['RankByVersion'] > highest_installable['RankByVersion'])
+            _missed_ix = releases[available_label] & (releases['RankByVersion'] > highest_installable['RankByVersion'])
         except IndexError:
             # None are installable, dismiss
             return None
             
         # Find highest missed and oldest missed (required to compute version and temporal lags)
         try:
-            _missed = releases[releases['Missed']]
+            _missed = releases[_missed_ix]
             
             highest_missed = _missed.iloc[-1]
             first_missed = _missed.iloc[_missed['RankByDate'].values.argmin()]
@@ -174,14 +177,16 @@ if __name__ == '__main__':
     
     print('Filter releases & set index')
     df_releases = df_releases[lambda d: d['Package'].isin(packages)]
-    df_releases.set_index('Package', inplace=True)
     print('.. {} releases'.format(len(df_releases)))
     
     # Fast access to releases
     print('Group releases by package')
-    releases_group = dict()
-    for name, group in df_releases.groupby('Package', sort=False):
-        releases_group[name] = group
+    df_releases = (
+        df_releases
+        .sort_values('RankByVersion')
+        .set_index('Package')
+        .sort_index(kind='mergesort')  # Stable sort
+    )
     
     # Prepare output
     OUTPUT_PATH = 'data/lags.csv'
@@ -197,9 +202,24 @@ if __name__ == '__main__':
             OUTPUT_PATH,
             usecols=OUTPUT_COLUMNS,
         )
-        # Resume job
-        print('Resume job at {}/{}'.format(len(df_output), len(df_dependencies)))
-        df_dependencies = df_dependencies.iloc[len(df_output):]
+        if len(df_output) > 0:
+            # Resume job
+            last_output = df_output.iloc[-1]
+            last_processed = (
+                df_dependencies
+                [
+                    lambda d:
+                    (d['Project'] == last_output['Package'])
+                    & (d['Release'] == last_output['Release'])
+                    & (d['Dependency'] == last_output['Dependency'])
+                    & (d['Constraint'] == last_output['Constraint'])
+                ]
+            ).iloc[0].name
+            row_number = df_dependencies.index.get_loc(last_processed)
+            
+            print('Output contains {} items'.format(len(df_output)))
+            print('Resume job at {}/{}'.format(row_number + 1, len(df_dependencies)))
+            df_dependencies = df_dependencies.iloc[row_number + 1:]
     else:
         print('Create new output file')
         df_output = pandas.DataFrame(columns=OUTPUT_COLUMNS)
@@ -216,21 +236,26 @@ if __name__ == '__main__':
         
         # Create jobs
         jobs = []
-        for row in tqdm.tqdm(chunk, total=chunk_size, desc='submit', leave=False):
+        for row in chunk:
             if row is None:
                 break
+            
+            releases = df_releases.loc[row.Dependency]
+            if isinstance(releases, pandas.Series):
+                releases = pandas.DataFrame(data=[releases])
+                
             jobs.append((
                 row.Project, row.Release, row.Dependency, row.Constraint,
                 row.ReleaseDate,
                 CENSOR_DATE if pandas.isnull(row.NextReleaseDateByDate) else row.NextReleaseDateByDate,
-                releases_group[row.Dependency]
+                releases,
             ))
         
         if len(jobs) == 0:
             print('No more job')
             continue
         
-        with multiprocessing.Pool() as pool:
+        with multiprocessing.Pool(processes=WORKERS) as pool:
             # Submit jobs
             results = pool.imap_unordered(_wrapper, jobs, 50)
             
