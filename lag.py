@@ -161,7 +161,7 @@ if __name__ == '__main__':
         ['Package']
     )
     print('.. {} packages'.format(len(packages)))
-    
+
     print('Filter dependencies & join dates')
     df_dependencies = (
         df_dependencies
